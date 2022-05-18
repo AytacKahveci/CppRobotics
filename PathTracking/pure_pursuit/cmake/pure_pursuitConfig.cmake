@@ -1,0 +1,1 @@
+add_library(pure_pursuit ALIAS pure_pursuit)

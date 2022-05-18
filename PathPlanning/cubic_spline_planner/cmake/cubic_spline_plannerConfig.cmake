@@ -1,0 +1,1 @@
+add_library(cubic_spline_planner ALIAS cubic_spline_planner)

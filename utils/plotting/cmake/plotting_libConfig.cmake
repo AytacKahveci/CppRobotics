@@ -1,0 +1,1 @@
+add_library(plotting_lib ALIAS plotting_lib)
