@@ -1,3 +1,4 @@
+// Copyright 2022 Aytac Kahveci
 #include <mpc_control/mpc_control.h>
 
 double pi2pi(double angle) {
@@ -90,9 +91,9 @@ void MPCControl::calcRefTrajectory(const std::vector<double>& rx,
                                    const int& pind,
                                    Eigen::MatrixXd* xref,
                                    int* ind,
-                                   Eigen::VectorXd* dref) {
-  (*xref) = Eigen::MatrixXd::Zero(params_.nx, params_.T + 1);
-  (*dref) = Eigen::VectorXd::Zero(params_.T + 1);
+                                   Eigen::MatrixXd* uref) {
+  (*xref) = Eigen::MatrixXd::Zero(params_.T * params_.nx, 1);
+  (*uref) = Eigen::MatrixXd::Zero(params_.T * params_.nu, 1);
 
   int ncourse = rx.size();
   double mind;
@@ -104,25 +105,38 @@ void MPCControl::calcRefTrajectory(const std::vector<double>& rx,
   (*xref)(1, 0) = ry[(*ind)];
   (*xref)(2, 0) = sp[(*ind)];
   (*xref)(3, 0) = ryaw[(*ind)];
-  (*dref)(0) = 0.0;  // steer operational point should be 0
+  double dir = 1.0;
+  if (sp[(*ind)] < 0.0)
+    dir = -1.0;
+  (*uref)(0, 0) = dir * 0.1;  // acceleration
+  (*uref)(1, 0) = 0.0;  // steer operational point should be 0
 
   double travel = 0.0;
+  int dind = 0;
   for (size_t i = 0; i < params_.T; ++i) {
     travel += fabs(state_.v) * params_.dt;
-    int dind = static_cast<int>(round(travel / dl));
-
+    // int dind = static_cast<int>(round(travel / dl));
+    dind++;
     if (((*ind) + dind) < ncourse) {
-      (*xref)(0, i) = rx[(*ind) + dind];
-      (*xref)(1, i) = ry[(*ind) + dind];
-      (*xref)(2, i) = sp[(*ind) + dind];
-      (*xref)(3, i) = ryaw[(*ind) + dind];
-      (*dref)(i) = 0.0;
+      (*xref)(i * params_.nx, 0) = rx[(*ind) + dind];
+      (*xref)(i * params_.nx + 1, 0) = ry[(*ind) + dind];
+      (*xref)(i * params_.nx + 2, 0) = sp[(*ind) + dind];
+      (*xref)(i * params_.nx + 3, 0) = ryaw[(*ind) + dind];
+      double dir = 1.0;
+      if (sp[(*ind) + dind] < 0.0)
+        dir = -1.0;
+      (*uref)(i * params_.nu, 0) = dir * 0.1;
+      (*uref)(i * params_.nu + 1, 0) = 0.0;
     } else {
-      (*xref)(0, i) = rx[ncourse - 1];
-      (*xref)(1, i) = ry[ncourse - 1];
-      (*xref)(2, i) = sp[ncourse - 1];
-      (*xref)(3, i) = ryaw[ncourse - 1];
-      (*dref)(i) = 0.0;
+      (*xref)(i * params_.nx, 0) = rx[ncourse - 1];
+      (*xref)(i * params_.nx + 1, 0) = ry[ncourse - 1];
+      (*xref)(i * params_.nx + 2, 0) = sp[ncourse - 1];
+      (*xref)(i * params_.nx + 3, 0) = ryaw[ncourse - 1];
+      double dir = 1.0;
+      if (sp[ncourse - 1] < 0.0)
+        dir = -1.0;
+      (*uref)(i * params_.nu, 0) = dir * 0.1;
+      (*uref)(i * params_.nu + 1, 0) = 0.0;
     }
   }
 }
@@ -176,7 +190,7 @@ bool MPCControl::checkGoal(const std::vector<double>& goal,
 }
 
 bool MPCControl::linearMPCControl(const Eigen::MatrixXd& xref,
-                                  const Eigen::VectorXd& dref,
+                                  Eigen::MatrixXd* uref,
                                   double* res) {
   Eigen::MatrixXd Psi =
       Eigen::MatrixXd::Zero(params_.nx * params_.T, params_.nx);
@@ -194,18 +208,22 @@ bool MPCControl::linearMPCControl(const Eigen::MatrixXd& xref,
   Qq(0, 0) = 1.0;
   Qq(1, 1) = 1.0;
   Qq(2, 2) = 0.5;
-  Qq(3, 3) = 0.5;
+  Qq(3, 3) = 1.0;
   Eigen::MatrixXd Rq = Eigen::MatrixXd::Identity(params_.nu, params_.nu);
-  Rq(0, 0) = 0.01;
-  Rq(1, 1) = 1.0;
+  Rq(0, 0) = 0.1;
+  Rq(1, 1) = 0.1;
 
 
   Eigen::MatrixXd A = Eigen::MatrixXd::Zero(params_.nx, params_.nx);
   Eigen::MatrixXd B = Eigen::MatrixXd::Zero(params_.nx, params_.nu);
   Eigen::VectorXd CC = Eigen::VectorXd::Zero(params_.nx);
   getLinearModelMatrix(state_.v, state_.yaw, state_.delta, &A, &B, &CC);
-  Eigen::MatrixXd C = Eigen::MatrixXd::Ones(1, params_.nx);
-
+  Eigen::MatrixXd C = Eigen::MatrixXd::Ones(params_.nx, params_.nx);
+  /* C(0, 0) = 0.0;
+  C(1, 1) = 0.0;
+  C(2, 2) = 1.0;
+  C(3, 3) = 1.0;
+ */
   for (int i = 0; i < params_.T; ++i) {
     int idx_x_i = i * params_.nx;
     int idx_x_i_prev = (i - 1) * params_.nx;
@@ -226,10 +244,10 @@ bool MPCControl::linearMPCControl(const Eigen::MatrixXd& xref,
           Omega.block(idx_x_i_prev, 0, params_.nx, params_.nu)
           + Psi.block(idx_x_i - 1, 0, params_.nx, params_.nx) * B;
 
-      for (int j = 0; j < i; ++j) {
+      for (int j = 0; j <= i; ++j) {
         int idx_u_j = j * params_.nu;
         Theta.block(idx_x_i, idx_u_j, params_.nx, params_.nu) =
-            Omega.block(idx_x_i - j * params_.nx, 0, params_.nx, params_.nu);
+            Omega.block((i - j) * params_.nx, 0, params_.nx, params_.nu);
       }
       if (i <= params_.nu) {
         int idx_u_j = i * params_.nu;
@@ -238,7 +256,7 @@ bool MPCControl::linearMPCControl(const Eigen::MatrixXd& xref,
     }
   }
 
-  std::cout << "A:" << std::endl;
+  /* std::cout << "A:" << std::endl;
   std::cout << A << std::endl;
   std::cout << "B:" << std::endl;
   std::cout << B << std::endl;
@@ -253,55 +271,52 @@ bool MPCControl::linearMPCControl(const Eigen::MatrixXd& xref,
   std::cout << "Q:" << std::endl;
   std::cout << Q << std::endl;
   std::cout << "R:" << std::endl;
-  std::cout << R << std::endl;
+  std::cout << R << std::endl; */
 
   Eigen::MatrixXd Cex =
       Eigen::MatrixXd::Zero(1, params_.nx * params_.T);
   std::cout << "Cex:" << std::endl;
   std::cout << Cex << std::endl;
-  for (int i = 0; i < params_.T; ++i) {
-    Cex.block(0, i * params_.nx, 1, params_.nx) = C;
-  }
   Eigen::MatrixXd CPsi =
-      Eigen::MatrixXd::Zero(params_.T, params_.nx);
+      Eigen::MatrixXd::Zero(params_.T * params_.nx, params_.nx);
 
   Eigen::MatrixXd COmega =
-      Eigen::MatrixXd::Zero(params_.T, params_.nu);
+      Eigen::MatrixXd::Zero(params_.T * params_.nx, params_.nu);
   Eigen::MatrixXd CTheta =
-      Eigen::MatrixXd::Zero(params_.T, params_.nu * params_.T);
+      Eigen::MatrixXd::Zero(params_.T * params_.nx, params_.T * params_.nu);
   for (int i = 0; i < params_.T; ++i) {
-    int idx_x_i = i;
+    int idx_x_i = i * params_.nx;
 
     if (i == 0) {
-      CPsi.block(0, 0, 1, params_.nx) = C*A;
-      COmega.block(0, 0, 1, params_.nu) = C*B;
-      CTheta.block(0, 0, 1, params_.nu) = C*B;
+      CPsi.block(0, 0, params_.nx, params_.nx) = C*A;
+      COmega.block(0, 0, params_.nx, params_.nu) = C*B;
+      CTheta.block(0, 0, params_.nx, params_.nu) = C*B;
     } else {
-      CPsi.block(idx_x_i, 0, 1, params_.nx) =
-          C * Psi.block(idx_x_i * params_.nx, 0, params_.nx, params_.nx);
-      COmega.block(idx_x_i, 0, 1, params_.nu) =
-          C * Omega.block(idx_x_i * params_.nx, 0, params_.nx, params_.nu);
+      CPsi.block(idx_x_i, 0, params_.nx, params_.nx) =
+          C * Psi.block(idx_x_i, 0, params_.nx, params_.nx);
+      COmega.block(idx_x_i, 0, params_.nx, params_.nu) =
+          C * Omega.block(idx_x_i, 0, params_.nx, params_.nu);
 
-      for (int j = 0; j < i; ++j) {
+      for (int j = 0; j <= i; ++j) {
         int idx_u_j = j * params_.nu;
-        CTheta.block(idx_x_i, idx_u_j, 1, params_.nu) =
-            COmega.block(idx_x_i - j, 0, 1, params_.nu);
+        CTheta.block(idx_x_i, idx_u_j, params_.nx, params_.nu) =
+            COmega.block((i - j) * params_.nx, 0, params_.nx, params_.nu);
       }
-      if (i <= params_.nu) {
+      /* if (i <= params_.nu) {
         int idx_u_j = i * params_.nu;
-        CTheta.block(idx_x_i, idx_u_j, 1, params_.nu) = C*B;
-      }
+        CTheta.block(idx_x_i, idx_u_j, params_.nx, params_.nu) = C*B;
+      } */
     }
   }
 
-  std::cout << "Cex:" << std::endl;
+  /* std::cout << "Cex:" << std::endl;
   std::cout << Cex << std::endl;
   std::cout << "CPsi:" << std::endl;
   std::cout << CPsi << std::endl;
   std::cout << "COmega:" << std::endl;
   std::cout << COmega << std::endl;
   std::cout << "CTheta:" << std::endl;
-  std::cout << CTheta << std::endl;
+  std::cout << CTheta << std::endl; */
 
   Eigen::MatrixXd Sp = xref;
   Eigen::MatrixXd Z;
@@ -309,72 +324,100 @@ bool MPCControl::linearMPCControl(const Eigen::MatrixXd& xref,
   x << state_.x, state_.y, state_.v, state_.yaw;
   Eigen::VectorXd u(params_.nu);
   double acceleration, delta;
-  u << dref[0], dref[1];
+  u << (*uref)(0, 0), (*uref)(1, 0);
 
   Eigen::MatrixXd Err = Sp - CPsi * x - COmega * u;
+  std::cout << "Err: " << std::endl;
+  std::cout << Err << std::endl;
   Eigen::MatrixXd g = 2.0 * (CTheta.transpose()) * Q * Err;
   Eigen::MatrixXd H = (CTheta.transpose()) * Q * CTheta + R;
 
-
-  const int kNumH = H.rows() * H.cols();
-  double h_mat[kNumH];
-  int ind = 0;
-  for (int i = 0; i < H.rows(); ++i) {
-    for (int j = 0; j < H.cols(); ++j) {
-      h_mat[ind] = H(i, j);
-      ind++;
+  Eigen::MatrixXd H_inv = H.inverse();
+  Eigen::MatrixXd DU = H_inv * g * 0.5;
+  for (int i = 0; i < params_.T; ++i) {
+    if (DU(i * params_.nu, 0) > 0.1) {
+      DU(i * params_.nu, 0) = 0.1;
+    } else if (DU(i * params_.nu, 0) < -0.1) {
+      DU(i * params_.nu, 0) = -0.1;
     }
+
+    DU(i * params_.nu + 1, 0) = pi2pi(DU(i * params_.nu + 1, 0));
   }
 
-  const int kNumG = g.rows() * g.cols();
-  double g_mat[kNumG];
-  ind = 0;
-  for (int i = 0; i < g.rows(); ++i) {
-    for (int j = 0; j < g.cols(); ++j) {
-      g_mat[ind] = g(i, j);
-      ind++;
+  for (int i = 0; i < params_.T; ++i) {
+    (*uref)(i * params_.nu, 0) += DU(i * params_.nu, 0);
+    (*uref)(i * params_.nu + 1, 0) += DU(i * params_.nu + 1, 0);
+    if ((*uref)(i * params_.nu, 0) > 0.1) {
+      (*uref)(i * params_.nu, 0) = 0.1;
+    } else if ((*uref)(i * params_.nu, 0) < -0.1) {
+      (*uref)(i * params_.nu, 0) = -0.1;
     }
+    (*uref)(i * params_.nu + 1, 0) = pi2pi((*uref)(i * params_.nu + 1, 0));
   }
+  /*
+  {
+    // QPOASES implementation
+    const int kNumH = H.rows() * H.cols();
+    double h_mat[kNumH];
+    int ind = 0;
+    for (int i = 0; i < H.rows(); ++i) {
+      for (int j = 0; j < H.cols(); ++j) {
+        h_mat[ind] = H(i, j);
+        ind++;
+      }
+    }
 
-  double lb[1];
-  double ub[1];
-  lb[0] = 1.0;
-  ub[0] = 1.0;
+    const int kNumG = g.rows() * g.cols();
+    double g_mat[kNumG];
+    ind = 0;
+    for (int i = 0; i < g.rows(); ++i) {
+      for (int j = 0; j < g.cols(); ++j) {
+        g_mat[ind] = g(i, j);
+        ind++;
+      }
+    }
 
-  double a_constraint[2] = {1.0, 1.0};
+    double lb[1];
+    double ub[1];
+    lb[0] = 1.0;
+    ub[0] = 1.0;
 
-  const int kNumVariables = params_.nu * params_.T;
-  const int kNumConstraints = 0;
-  if (!solver_init_) {
-    qproblem_ = qpOASES::QProblem(kNumVariables, kNumConstraints);
+    double a_constraint[2] = {1.0, 1.0};
 
-    auto ret = qproblem_.init(
-      h_mat,
+    const int kNumVariables = params_.nu * params_.T;
+    const int kNumConstraints = 0;
+    if (!solver_init_) {
+      qproblem_ = qpOASES::QProblem(kNumVariables, kNumConstraints);
+
+      auto ret = qproblem_.init(
+        h_mat,
+        g_mat,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        params_.max_iter);
+
+      if (ret != qpOASES::SUCCESSFUL_RETURN) {
+        std::cerr << "Error in init" << std::endl;
+        return false;
+      }
+
+      solver_init_ = true;
+    }
+
+    qproblem_.hotstart(
       g_mat,
-      nullptr,
       nullptr,
       nullptr,
       nullptr,
       nullptr,
       params_.max_iter);
 
-    if (ret != qpOASES::SUCCESSFUL_RETURN) {
-      std::cerr << "Error in init" << std::endl;
-      return false;
-    }
+    qproblem_.getPrimalSolution(res);
+  } */
 
-    solver_init_ = true;
-  }
-
-  qproblem_.hotstart(
-    g_mat,
-    nullptr,
-    nullptr,
-    nullptr,
-    nullptr,
-    params_.max_iter);
-
-  qproblem_.getPrimalSolution(res);
   return true;
 }
 
@@ -384,7 +427,8 @@ void MPCControl::doSimulation(const std::vector<double>& rx,
                               const std::vector<double>& rk,
                               const std::vector<double>& sp,
                               const double& dl,
-                              const State& initial_state) {
+                              const State& initial_state,
+                              void* plotting) {
   std::vector<double> goal = {rx.back(), ry.back()};
 
   state_ = initial_state;
@@ -413,19 +457,23 @@ void MPCControl::doSimulation(const std::vector<double>& rx,
   std::vector<double> rryaw = ryaw;
   smoothYaw(&rryaw);
 
+  Eigen::MatrixXd u = Eigen::MatrixXd::Zero(params_.T * params_.nu, 1);
+
   while (time <= 500.0) {
     Eigen::MatrixXd xref;
-    Eigen::VectorXd dref;
+    Eigen::MatrixXd uref;
     calcRefTrajectory(rx, ry, rryaw, rk, sp, dl, target_ind,
-                      &xref, &target_ind, &dref);
+                      &xref, &target_ind, &uref);
 
     const int kNumVariables = params_.nu * params_.T;
     double res[kNumVariables] = {0.0};
-    linearMPCControl(xref, dref, res);
+    linearMPCControl(xref, &u, res);
 
 
-    double ai = res[kNumVariables - 2];
-    double di = res[kNumVariables - 1];
+    /* double ai = res[kNumVariables - 2];
+    double di = res[kNumVariables - 1]; */
+    double ai = u(0, 0);
+    double di = u(1, 0);
     updateState(ai, di);
     time = time + params_.dt;
 
@@ -436,6 +484,25 @@ void MPCControl::doSimulation(const std::vector<double>& rx,
     t.push_back(time);
     d.push_back(di);
     a.push_back(ai);
+
+    if (plotting != nullptr) {
+      ((Plotting*)plotting)->plot(rx, ry, x, y);
+    }
+
+    std::cout << "Target: " << std::endl;
+    for (int i = 0; i < params_.T; ++i) {
+      std::cout << "X: " << xref(i * params_.nx, 0)
+                << " Y: " << xref(i * params_.nx + 1, 0) << std::endl;
+    }
+    std::cout << "State: " << std::endl;
+    std::cout << "X: " << state_.x
+              << " Y: " << state_.y
+              << " Yaw: " << state_.yaw << std::endl;
+    std::cout << "Control: " << std::endl;
+    for (int i = 0; i < params_.T; ++i) {
+      std::cout << "ai: " << u(i * params_.nu, 0)
+                << " di: " << u(i * params_.nu + 1, 0) << std::endl;
+    }
 
     if (checkGoal(goal, target_ind, rx.size())) {
       std::cout << "Goal reached" << std::endl;

@@ -6,6 +6,7 @@
 #include <limits.h>
 #include <Eigen/Dense>
 #include <qpOASES.hpp>
+#include <plotting/plotting.h>
 
 #define DEG2RAD(deg) (deg * M_PI / 180.0);
 
@@ -45,7 +46,7 @@ struct MPCParam {
   double goal_distance = 1.5;  //!< goal distance
   double stop_speed = 0.5 / 3.6;  //!< stop speed
 
-  int max_iter = 3;  //!< max iteration
+  int max_iter = 20;  //!< max iteration
   double du_th = 0.1;  //!< iteration finish param
   double dt = 0.2;  //!< control period
 
@@ -60,8 +61,8 @@ struct MPCParam {
 
   double max_steer = DEG2RAD(45.0);  //!< maximum steering angle [rad]
   double max_dsteer = DEG2RAD(30.0);  //!< maximum steering speed [rad/s]
-  double max_speed = 55.0 / 3.6;  //!< maximum speed [m/s]
-  double min_speed = -20.0 / 3.6;  //!< minimum speed [m/s]
+  double max_speed = 0.2;  //!< maximum speed [m/s]
+  double min_speed = -0.2;  //!< minimum speed [m/s]
   double max_accel = 1.0;  //!< maximum acceleration
 };
 
@@ -130,7 +131,7 @@ class MPCControl {
    * @param[in] pind previous path index
    * @param[out] xref reference matrix
    * @param[out] ind path index
-   * @param[out] dref delta ref matrix
+   * @param[out] uref control ref matrix
   */
   void calcRefTrajectory(const std::vector<double>& rx,
                          const std::vector<double>& ry,
@@ -141,7 +142,7 @@ class MPCControl {
                          const int& pind,
                          Eigen::MatrixXd* xref,
                          int* ind,
-                         Eigen::VectorXd* dref);
+                         Eigen::MatrixXd* uref);
 
   /**
    * @brief Calculate speed profile
@@ -175,13 +176,13 @@ class MPCControl {
    * @brief Calculate MPC Control
    * 
    * @param xref reference matrix
-   * @param dref delta ref matrix
+   * @param dref control ref matrix
    * @param res result control array
    * @return true if solution is converged
    * @return false if solution is not converged
    */
   bool linearMPCControl(const Eigen::MatrixXd& xref,
-                        const Eigen::VectorXd& dref,
+                        Eigen::MatrixXd* uref,
                         double* res);
 
   /**
@@ -194,6 +195,7 @@ class MPCControl {
    * @param[in] sp speed profile
    * @param[in] dl path resolution
    * @param[in] initial_state initial state
+   * @param[in] plotting plotting interface pointer
   */
   void doSimulation(const std::vector<double>& rx,
                     const std::vector<double>& ry,
@@ -201,7 +203,8 @@ class MPCControl {
                     const std::vector<double>& rk,
                     const std::vector<double>& sp,
                     const double& dl,
-                    const State& initial_state);
+                    const State& initial_state,
+                    void* plotting);
 
   /**
    * @brief Smooth yaw angles vector
